@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22.0)
+project(Gonka)
+set (CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+add_executable(Gonka Gonka.cpp)
+add_library(RaceLib SHARED Race.h Race.cpp Racer.h Racer.cpp Ground.h Ground.cpp Fly.h Fly.cpp AllroadBoots.h AllroadBoots.cpp Broom.h Broom.cpp Camel.h Camel.cpp Centavr.h Centavr.cpp Eagle.h Eagle.cpp FastCamel.h FastCamel.cpp FlyCarpet.h FlyCarpet.cpp)
+target_link_libraries(Gonka RaceLib)
