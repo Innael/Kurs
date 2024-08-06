@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(Qt6 REQUIRED COMPONENTS Sql)
-
+find_package(Qt6 COMPONENTS PrintSupport REQUIRED)
 
 set(PROJECT_SOURCES
         main.cpp
@@ -20,6 +20,11 @@ set(PROJECT_SOURCES
         mainwindow.ui
         DataBase.cpp
         DataBase.h
+        graphwin.h
+        graphwin.cpp
+        graphwin.ui
+        qcustomplot.h
+        qcustomplot.cpp
 )
 
 add_executable(InspektorAeroportov
@@ -28,7 +33,7 @@ add_executable(InspektorAeroportov
 
 
 target_link_libraries(InspektorAeroportov PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
-target_link_libraries(InspektorAeroportov PRIVATE Qt6::Sql)
+target_link_libraries(InspektorAeroportov PRIVATE Qt6::Sql Qt6::PrintSupport)
 
 set_target_properties(InspektorAeroportov PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER my.example.com
