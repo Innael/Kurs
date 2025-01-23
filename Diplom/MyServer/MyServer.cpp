@@ -185,13 +185,21 @@ void handlePostRequest(const http::request<http::string_body>& req, http::respon
 
             std::sort(final_vec.begin(), final_vec.end(), [](const auto& a, const auto& b) {
                 return a.second > b.second; 
-            });         
+            });
 
-            
-                        
+            std::vector<std::string> response_vec;
+
             for (auto const& elem : final_vec) {
-                responseBody = responseBody + elem.first + "\n";
-                std::cout << elem.first << " " << elem.second <<  std::endl;
+                response_vec.push_back(elem.first);
+            }
+
+            auto last = std::unique(response_vec.begin(), response_vec.end());
+
+            response_vec.erase(last, response_vec.end());     
+
+                        
+            for (auto const& elem : response_vec) {
+                responseBody = responseBody + elem + "\n";
             }
 
             if (responseBody != "") {
