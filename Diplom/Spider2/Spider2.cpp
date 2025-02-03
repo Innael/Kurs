@@ -76,45 +76,36 @@ std::vector<std::string> extract_links(const std::string& text, const std::strin
     // Если базовый URL заканчивается на '/', убираем его
     std::string base = (last_slash == base_url.length() - 1) ? base_url : base_url.substr(0, last_slash + 1);
 
-    // Регулярное выражение для поиска URL
-    std::regex url_regex(R"((https?://[^\s"'>]+|[^\s"'>]+\.[^\s"'>]+))");
-    std::smatch url_match;    
+    // Регулярное выражение для поиска тегов <a> с атрибутом href
+    std::regex a_tag_regex(R"(<a\s+href=["']?([^"'>]+)["']?[^>]*>)");
+    std::smatch a_tag_match;
 
     // Ищем все совпадения в тексте
     auto search_start = text.cbegin();
-    while (std::regex_search(search_start, text.cend(), url_match, url_regex)) {
-        std::string found_link = url_match[0];
+    while (std::regex_search(search_start, text.cend(), a_tag_match, a_tag_regex)) {
+        std::string found_link = a_tag_match[1]; // Извлекаем значение href
 
-        // Удаляем фрагмент, если он есть
-        size_t fragment_pos = found_link.find('#');
-        if (fragment_pos != std::string::npos) {
-            found_link = found_link.substr(0, fragment_pos); // Обрезаем до символа '#'
-        }
-
-        // Игнорируем ссылки, начинающиеся с '#'
-        if (found_link.empty() || found_link[0] == '#') {
-            search_start = url_match.suffix().first; // Продолжаем поиск
-            continue;
-        }
-
-        if (found_link.find("http://") == std::string::npos &&
-            found_link.find("https://") == std::string::npos) {
-            // Если относительная ссылка начинается с '/', это означает, что она относительна корня
-            if (found_link[0] == '/') {
-                found_link = base.substr(0, base.find("/", 8)) + found_link; // Добавляем домен и относительный путь
+        // Проверяем, является ли ссылка абсолютной
+        if (!found_link.empty() && (found_link.find("http://") != std::string::npos || found_link.find("https://") != std::string::npos)) {
+            // Удаляем фрагмент, если он есть
+            size_t fragment_pos = found_link.find('#');
+            if (fragment_pos != std::string::npos) {
+                found_link = found_link.substr(0, fragment_pos); // Обрезаем до символа '#'
             }
 
-            std::string relative = found_link;
-            // Если относительная ссылка начинается с './', убираем './'            
-            if (relative.substr(0, 2) == "./") {
-                relative = relative.substr(2);
-                found_link = base + relative;
+            // Игнорируем ссылки, начинающиеся с '#'
+            if (found_link[0] == '#') {
+                search_start = a_tag_match.suffix().first; // Продолжаем поиск
+                continue;
             }
-             //found_link = base + found_link; // Объединение базового URL с относительной ссылкой
+
+            links.push_back(found_link); // Добавляем найденный URL в вектор        
         }
 
-        links.push_back(found_link); // Добавляем найденный URL в вектор
-        search_start = url_match.suffix().first; // Продолжаем поиск после найденного URL
+        // Сдвигаем итератор на позицию после найденного тега
+        auto iterator_check = search_start;
+        search_start = a_tag_match.suffix().first;
+        if (iterator_check == search_start) break;
     }
 
     return links;
