@@ -111,7 +111,7 @@ int main()
     SetConsoleCP (1251);
     SetConsoleOutputCP(1251);        
 
-    std::cout << "Поток " << std::this_thread::get_id << " является основным потоком.\n\n";
+    std::cout << "Поток " << std::this_thread::get_id() << " является основным потоком.\n\n";
     std::function<void()> f1(func1);
     std::function<void()> f2(func2);
     std::function<void()> f3(func3);

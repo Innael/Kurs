@@ -16,7 +16,13 @@
 #include <future>
 #include <atomic>
 #include <chrono>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <functional>
+#include <condition_variable>
 #pragma execution_character_set ( "utf-8" )
+
 
 namespace beast = boost::beast;        // из Boost.Beast
 namespace http = beast::http;          // из Boost.Beast.HTTP
@@ -68,8 +74,10 @@ std::vector<std::pair<std::string, int>> my_word_index(std::string clean_respons
     return index_vector;
 }
 
-std::vector<std::string> extract_links(const std::string& text, const std::string& base_url) {
+void extract_links(const std::string& text, const std::string& base_url, std::vector<std::pair<std::string, int>>& url_vec, int current_depth) {
     std::vector<std::string> links;
+    std::pair<std::string, int> temp;
+    temp.second = ++current_depth;
 
     // Находим последний слеш в базовом URL
     size_t last_slash = base_url.find_last_of('/');
@@ -85,30 +93,34 @@ std::vector<std::string> extract_links(const std::string& text, const std::strin
     while (std::regex_search(search_start, text.cend(), a_tag_match, a_tag_regex)) {
         std::string found_link = a_tag_match[1]; // Извлекаем значение href
 
-        // Проверяем, является ли ссылка абсолютной
-        if (!found_link.empty() && (found_link.find("http://") != std::string::npos || found_link.find("https://") != std::string::npos)) {
-            // Удаляем фрагмент, если он есть
-            size_t fragment_pos = found_link.find('#');
-            if (fragment_pos != std::string::npos) {
-                found_link = found_link.substr(0, fragment_pos); // Обрезаем до символа '#'
-            }
-
-            // Игнорируем ссылки, начинающиеся с '#'
-            if (found_link[0] == '#') {
-                search_start = a_tag_match.suffix().first; // Продолжаем поиск
-                continue;
-            }
-
-            links.push_back(found_link); // Добавляем найденный URL в вектор        
+        // Удаляем фрагмент, если он есть
+        size_t fragment_pos = found_link.find('#');
+        if (fragment_pos != std::string::npos) {
+            found_link = found_link.substr(0, fragment_pos); // Обрезаем до символа '#'
         }
+
+        // Игнорируем ссылки, начинающиеся с '#'
+        if (found_link.empty() || found_link[0] == '#') {
+            search_start = a_tag_match.suffix().first; // Продолжаем поиск
+            continue;
+        }
+
+        // Проверяем, является ли ссылка абсолютной
+        if (found_link.find("http://") != std::string::npos || found_link.find("https://") != std::string::npos) {
+            temp.first = found_link;
+        }
+        else {
+            // Если это относительная ссылка, преобразуем её в абсолютную
+            temp.first = base + found_link; 
+        }
+
+        url_vec.push_back(temp); // Добавляем найденный URL в вектор        
 
         // Сдвигаем итератор на позицию после найденного тега
         auto iterator_check = search_start;
         search_start = a_tag_match.suffix().first;
         if (iterator_check == search_start) break;
     }
-
-    return links;
 }
 
 std::string clean_html(const std::string& input) {
@@ -132,8 +144,6 @@ std::string clean_html(const std::string& input) {
 
 void my_index(std::string &url, std::vector<std::pair<std::string,int>> &index_vec, pqxx::connection &con) {
     pqxx::work ac{ con };
-    std::string word;
-    int inx = 1;
 
     while (transaction_in_progress.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -145,7 +155,7 @@ void my_index(std::string &url, std::vector<std::pair<std::string,int>> &index_v
         if (elem.first.size() < 16 && url.size() < 501) {
             ac.exec("INSERT INTO index_base (url, word, count)"
                 "VALUES ('" + ac.esc(url) + "', '" + ac.esc(elem.first) + "', '" + std::to_string(elem.second) + "' );");
-        }
+        }        
     }
 
     ac.commit();
@@ -153,12 +163,16 @@ void my_index(std::string &url, std::vector<std::pair<std::string,int>> &index_v
     transaction_in_progress.store(false);
 }
 
+void my_fetchPage(std::vector<std::pair<std::string, int>>& url_vec, std::pair<std::string, int> url_pair, pqxx::connection& con){
+    try {
 
-std::future<int> fetchPage(std::string& url, pqxx::connection& con, int current_depth, int depth, int redirect_count) {
-    return std::async(std::launch::async, [url, &con, current_depth, depth, redirect_count]() mutable {
-        int result = EXIT_SUCCESS;
-        try {
+        int current_depth = url_pair.second;
+        int redirect_count = 0;
+        std::string url = url_pair.first;
+        bool success = false;
 
+
+        while (success == false) {
             // Создаем ввод-вывод контекст и TCP сокет
             net::io_context io_context;
             ssl::context ssl_context(ssl::context::sslv23);
@@ -191,7 +205,7 @@ std::future<int> fetchPage(std::string& url, pqxx::connection& con, int current_
 
             // Получаем конечные точки
             auto const endpoints = resolver.resolve(host, "https");
-            net::connect(stream.next_layer().socket(), endpoints);      
+            net::connect(stream.next_layer().socket(), endpoints);
 
             // Устанавливаем SSL соединение
             stream.handshake(ssl::stream_base::client);
@@ -212,6 +226,7 @@ std::future<int> fetchPage(std::string& url, pqxx::connection& con, int current_
             // Проверяем код ответа
             std::cout << "Response code: " << res.result_int() << std::endl;
             std::cout << "Current depth: " << current_depth << std::endl;
+            std::cout << "Url: " << url << std::endl;
 
             if (res.result_int() != 404) {
 
@@ -221,57 +236,136 @@ std::future<int> fetchPage(std::string& url, pqxx::connection& con, int current_
                         res.result() == http::status::found) {
                         ++redirect_count;
 
-                        std::cout << redirect_count << std::endl;
+                        std::cout << "Redirect count:" << redirect_count << std::endl;
 
                         // Извлекаем новый URL из заголовка Location
                         auto location = std::string(res["Location"].data(), res["Location"].size());
                         std::cout << "Redirecting to: " << location << std::endl;
                         url = location; // Обновляем URL для следующего запроса
-                        if (current_depth < depth) {
-                            result = fetchPage(url, con, current_depth, depth, redirect_count).get(); // Повторяем запрос с новым URL
-                        }
+                        
                     }
+                    else success = true;
                 }
+                else {
+                    beast::error_code ec;
+                    stream.shutdown(ec);
+                    break;
+                } 
 
-                // Если не перенаправление, выводим ответ и выходим
+                if (success = true) {                          // Если не перенаправление, выводим ответ и выходим
+                    std::string clean = clean_html(res.body());                    
 
-                std::string clean = clean_html(res.body());
+                    std::vector<std::pair<std::string, int>> indx_vec = my_word_index(clean);
+                    extract_links(res.body(), url, url_vec, current_depth);                   
 
-                ++current_depth;
-
-                std::vector<std::pair<std::string, int>> indx_vec = my_word_index(clean);
-                std::vector<std::string> url_vec = extract_links(res.body(), url);
-                                
-                my_index(url, indx_vec, con);
-                if (current_depth < depth) {
-                    std::vector<std::future<int>> futures;
-                    for (auto const& elem : url_vec) {
-                        std::string temp_url_str = elem;
-                        url = temp_url_str;
-                        futures.push_back(fetchPage(temp_url_str, con, current_depth, depth, redirect_count)); // Повторяем запрос с новым URL                    
-                    }
-                    for (auto& fut : futures) {
-                        fut.get(); // Получаем результат
-                    }
+                    my_index(url, indx_vec, con);
                 }
 
             }
-
-            // Закрываем сокет
+            else {
+                beast::error_code ec;
+                stream.shutdown(ec);
+                break;
+            }
             beast::error_code ec;
-            stream.shutdown(ec);
-        }
+            stream.shutdown(ec);  // Закрываем сокет
+        }     
+        
+    }
 
-        catch (std::exception& e) {
-            std::cerr << "Ошибка: " << e.what() << std::endl;
-            return EXIT_FAILURE;
-        }
-
-        return EXIT_SUCCESS;   
-     });
+    catch (std::exception& e) {
+        std::cerr << "Ошибка: " << e.what() << std::endl;       
+    }
 }
 
+class safe_queue {
+public:
+    std::queue<std::pair<std::string, int>> f_queue;
+    std::mutex safe_queue_mutex;
+    std::condition_variable sq_convar;
+    std::atomic<bool> noty = false;
+    std::vector<std::pair<std::string, int>>* vec_ptr = nullptr;
+    pqxx::connection* con_ptr = nullptr;
 
+
+
+
+    void push(std::pair<std::string, int> url_pair) {
+        std::lock_guard<std::mutex> lk(safe_queue_mutex);
+        f_queue.push(url_pair);
+        //std::cout << "Адрес помещён в очередь\n";
+        noty = true;
+        sq_convar.notify_one();
+    }
+
+    void pop() {
+        std::pair<std::string, int> temp;
+        std::unique_lock<std::mutex> ulk(safe_queue_mutex);
+        sq_convar.wait(ulk, [&] { return noty == true; });
+        temp = f_queue.front();
+        f_queue.pop();
+        my_fetchPage(*vec_ptr, temp, *con_ptr);
+        if (f_queue.empty() == true) noty = false;
+    }
+
+    void Set_url_vec(std::vector<std::pair<std::string, int>>& url_vec) {
+        vec_ptr = &url_vec;
+    }
+
+    void Set_con_ptr(pqxx::connection& con) {
+        con_ptr = &con;
+    }
+
+};
+
+
+class thread_pool {
+public:
+    std::vector<std::thread> tr_vec;
+    safe_queue tp_sq;
+    int core_count = 1;
+    std::atomic<int> pool = 1;
+    std::atomic<bool> ready = false;
+    std::atomic<bool> stop = false;
+
+    thread_pool(std::vector<std::pair<std::string, int>>& url_vec, pqxx::connection& con) {
+        core_count = std::thread::hardware_concurrency();
+        pool = core_count;
+        tp_sq.Set_url_vec(url_vec);
+        tp_sq.Set_con_ptr(con);
+        for (int i = 0; i < pool; ++i) {
+            tr_vec.push_back(std::thread(&thread_pool::work, this));            
+        }
+        ready = true;
+    }
+
+    void work() {
+        while (!ready) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 2;) {
+            if (tp_sq.f_queue.empty() == false) {                
+                tp_sq.pop();                
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            if (tp_sq.f_queue.empty() == true && stop == true) i = 2;
+        }
+    }
+
+    void submit(std::pair<std::string, int> url_pair) {
+        tp_sq.push(url_pair);
+    }
+
+
+    ~thread_pool() {
+        for (auto& elem : tr_vec) {
+            if (elem.joinable()) {
+                elem.join();
+            }
+        }
+    }
+};
 
 
 int main() {
@@ -332,10 +426,24 @@ int main() {
 
     tr.commit();    
 
-    auto future_result = fetchPage(start_page, con, current_depth, int_depth, redirect_count);
+    std::pair <std::string, int> first_pair;
+    first_pair.first = start_page;
+    first_pair.second = 1;
 
-    int result = future_result.get();
+    std::vector<std::pair<std::string, int>> url_vector;
+    url_vector.push_back(first_pair);
 
+    my_fetchPage(url_vector, url_vector[0], con);
+    
+    thread_pool th_pool(url_vector, con);
+
+        for (int r = 1; r < url_vector.size(); ++r) {  
+            if (url_vector[r].second < int_depth+1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                th_pool.submit(url_vector[r]);
+            }
+        }
+        th_pool.stop = true;
 }
 catch (const boost::property_tree::ini_parser_error& e) {
     std::cerr << "INI Parser Error: " << e.what() << std::endl;
