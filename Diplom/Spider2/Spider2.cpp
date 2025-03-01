@@ -31,6 +31,7 @@ using tcp = boost::asio::ip::tcp;      // из Boost.Asio
 namespace ssl = net::ssl;
 
 int const max_redirect_count = 5;
+int global_depth = 1;
 
 std::atomic<bool> transaction_in_progress = false;
 
@@ -74,15 +75,14 @@ std::vector<std::pair<std::string, int>> my_word_index(std::string clean_respons
     return index_vector;
 }
 
-void extract_links(const std::string& text, const std::string& base_url, std::vector<std::pair<std::string, int>>& url_vec, int current_depth) {
-    std::vector<std::string> links;
+void extract_links(const std::string& text, const std::string& base_url, std::vector<std::pair<std::string, int>>& url_vec, int current_depth, std::vector<std::string>& check_vec) {
     std::pair<std::string, int> temp;
     temp.second = ++current_depth;
 
     // Находим последний слеш в базовом URL
     size_t last_slash = base_url.find_last_of('/');
     // Если базовый URL заканчивается на '/', убираем его
-    std::string base = (last_slash == base_url.length() - 1) ? base_url : base_url.substr(0, last_slash + 1);
+    std::string base = (last_slash == base_url.length() - 1) ? base_url : base_url.substr(0, last_slash);
 
     // Регулярное выражение для поиска тегов <a> с атрибутом href
     std::regex a_tag_regex(R"(<a\s+href=["']?([^"'>]+)["']?[^>]*>)");
@@ -111,10 +111,34 @@ void extract_links(const std::string& text, const std::string& base_url, std::ve
         }
         else {
             // Если это относительная ссылка, преобразуем её в абсолютную
-            temp.first = base + found_link; 
+            if (found_link[0] == '/') {
+                // Если ссылка начинается с '/', используем базовый домен
+                size_t link_size = found_link.size();
+                last_slash = found_link.find_last_of('/');
+                found_link = found_link.substr(last_slash, link_size);
+                temp.first = base + found_link;
+            }
+            else {
+                temp.first = base + "/" + found_link;
+            }
         }
-
-        url_vec.push_back(temp); // Добавляем найденный URL в вектор        
+        //std::cout << temp.first << std::endl;
+        if (found_link.find("index.php?") != std::string::npos){                   // проверяем нет ли "мусорных" ссылок 
+        }
+        else {
+            bool check_url = false;
+            for (const auto& elem : check_vec) {
+                if (elem == temp.first) {
+                    check_url = true;
+                    break;
+                }
+            }
+            if (!check_url) {
+                url_vec.push_back(temp); // Добавляем найденный URL в вектор 
+                check_vec.push_back(temp.first);
+                check_url = false;
+            }
+        }        
 
         // Сдвигаем итератор на позицию после найденного тега
         auto iterator_check = search_start;
@@ -163,7 +187,7 @@ void my_index(std::string &url, std::vector<std::pair<std::string,int>> &index_v
     transaction_in_progress.store(false);
 }
 
-void my_fetchPage(std::vector<std::pair<std::string, int>>& url_vec, std::pair<std::string, int> url_pair, pqxx::connection& con){
+void my_fetchPage(std::vector<std::pair<std::string, int>>& url_vec, std::pair<std::string, int> url_pair, pqxx::connection& con, std::vector<std::string>& check_vec){
     try {
 
         int current_depth = url_pair.second;
@@ -252,11 +276,14 @@ void my_fetchPage(std::vector<std::pair<std::string, int>>& url_vec, std::pair<s
                     break;
                 } 
 
-                if (success = true) {                          // Если не перенаправление, выводим ответ и выходим
+                if (success == true) {                          // Если не перенаправление, выводим ответ и выходим
                     std::string clean = clean_html(res.body());                    
 
                     std::vector<std::pair<std::string, int>> indx_vec = my_word_index(clean);
-                    extract_links(res.body(), url, url_vec, current_depth);                   
+                    if (current_depth < global_depth) {
+                        extract_links(res.body(), url, url_vec, current_depth, check_vec);
+                    }
+                    
 
                     my_index(url, indx_vec, con);
                 }
@@ -285,6 +312,7 @@ public:
     std::condition_variable sq_convar;
     std::atomic<bool> noty = false;
     std::vector<std::pair<std::string, int>>* vec_ptr = nullptr;
+    std::vector<std::string>* url_check_ptr = nullptr;
     pqxx::connection* con_ptr = nullptr;
 
 
@@ -304,7 +332,7 @@ public:
         sq_convar.wait(ulk, [&] { return noty == true; });
         temp = f_queue.front();
         f_queue.pop();
-        my_fetchPage(*vec_ptr, temp, *con_ptr);
+        my_fetchPage(*vec_ptr, temp, *con_ptr, *url_check_ptr);
         if (f_queue.empty() == true) noty = false;
     }
 
@@ -314,6 +342,10 @@ public:
 
     void Set_con_ptr(pqxx::connection& con) {
         con_ptr = &con;
+    }
+
+    void Set_check_vec(std::vector<std::string>& url_check_vec) {
+        url_check_ptr = &url_check_vec;
     }
 
 };
@@ -328,11 +360,12 @@ public:
     std::atomic<bool> ready = false;
     std::atomic<bool> stop = false;
 
-    thread_pool(std::vector<std::pair<std::string, int>>& url_vec, pqxx::connection& con) {
+    thread_pool(std::vector<std::pair<std::string, int>>& url_vec, pqxx::connection& con, std::vector<std::string>& url_check_vec) {
         core_count = std::thread::hardware_concurrency();
         pool = core_count;
         tp_sq.Set_url_vec(url_vec);
         tp_sq.Set_con_ptr(con);
+        tp_sq.Set_check_vec(url_check_vec);
         for (int i = 0; i < pool; ++i) {
             tr_vec.push_back(std::thread(&thread_pool::work, this));            
         }
@@ -426,16 +459,20 @@ int main() {
 
     tr.commit();    
 
+    global_depth = int_depth;
+
     std::pair <std::string, int> first_pair;
     first_pair.first = start_page;
     first_pair.second = 1;
 
     std::vector<std::pair<std::string, int>> url_vector;
     url_vector.push_back(first_pair);
+    std::vector<std::string> check_url_vec;
+    check_url_vec.push_back(start_page);
 
-    my_fetchPage(url_vector, url_vector[0], con);
+    my_fetchPage(url_vector, url_vector[0], con, check_url_vec);
     
-    thread_pool th_pool(url_vector, con);
+    thread_pool th_pool(url_vector, con, check_url_vec);
 
         for (int r = 1; r < url_vector.size(); ++r) {  
             if (url_vector[r].second < int_depth+1) {
